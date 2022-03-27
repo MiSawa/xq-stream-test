@@ -1,6 +1,7 @@
 use anyhow::Result;
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 enum Index {
     Array(usize),
     Map(String),
@@ -15,7 +16,40 @@ enum PrimitiveValue {
     String(String),
 }
 
+struct Value {
+    path: Path,
+    value: Option<PrimitiveValue>,
+}
+impl Value {
+    fn print(&self) {
+        print!("[");
+        print!("[");
+        for (i, v) in self.path.iter().enumerate() {
+            if i != 0 {
+                print!(",");
+            }
+            match v {
+                Index::Array(i) => print!("{i}"),
+                Index::Map(s) => print!("{s:?}"),
+            }
+        }
+        print!("]");
+        if let Some(value) = self.value {
+            print!(",");
+            match value {
+                PrimitiveValue::Null => print!("null"),
+                PrimitiveValue::Boolean(v) => print!("{v}"),
+                PrimitiveValue::Number(v) => print!("{v}"),
+                PrimitiveValue::String(v) => print!("{v:?}"),
+            }
+        }
+        print!("]");
+        println!("");
+    }
+}
+
 struct StreamState<'a> {
+    sender: SyncSender<Value>,
     path: &'a mut Path,
 }
 
@@ -35,24 +69,17 @@ impl<'a> StreamState<'a> {
     }
 
     fn emit_value(&mut self, value: PrimitiveValue) {
-        print!("[");
-        self.emit_path();
-        print!(",");
-        match value {
-            PrimitiveValue::Null => print!("null"),
-            PrimitiveValue::Boolean(v) => print!("{v}"),
-            PrimitiveValue::Number(v) => print!("{v}"),
-            PrimitiveValue::String(v) => print!("{v:?}"),
-        }
-        print!("]");
-        println!("");
+        self.sender.send(Value {
+            path: self.path.clone(),
+            value: Some(value),
+        });
     }
 
     fn emit_close(&self) {
-        print!("[");
-        self.emit_path();
-        print!("]");
-        println!("");
+        self.sender.send(Value {
+            path: self.path.clone(),
+            value: None,
+        });
     }
 }
 
@@ -216,7 +243,11 @@ impl<'de> serde::Deserialize<'de> for Stream {
         D: serde::Deserializer<'de>,
     {
         let mut path = vec![];
-        let mut visitor = StreamState { path: &mut path };
+        let (sender, recv) = sync_channel(1);
+        let mut visitor = StreamState {
+            sender,
+            path: &mut path,
+        };
         deserializer.deserialize_any(&mut visitor)?;
         Ok(Self)
     }
