@@ -21,13 +21,15 @@ enum PrimitiveValue {
     Boolean(bool),
     Number(f64),
     String(String),
+    EmptyArray,
+    EmptyObject,
 }
 
-struct Value {
+struct PathValue {
     path: Path,
     value: Option<PrimitiveValue>,
 }
-impl Value {
+impl PathValue {
     fn print(&self) {
         print!("[");
         print!("[");
@@ -48,6 +50,8 @@ impl Value {
                 PrimitiveValue::Boolean(v) => print!("{v}"),
                 PrimitiveValue::Number(v) => print!("{v}"),
                 PrimitiveValue::String(v) => print!("{v:?}"),
+                PrimitiveValue::EmptyArray => print!("[]"),
+                PrimitiveValue::EmptyObject => print!("{{}}"),
             }
         }
         print!("]");
@@ -56,14 +60,14 @@ impl Value {
 }
 
 struct StreamState<'a> {
-    sender: SyncSender<Result<Value>>,
+    sender: SyncSender<Result<PathValue>>,
     path: &'a mut Path,
 }
 
 impl<'a> StreamState<'a> {
     fn emit_value(&mut self, value: PrimitiveValue) {
         self.sender
-            .send(Ok(Value {
+            .send(Ok(PathValue {
                 path: self.path.clone(),
                 value: Some(value),
             }))
@@ -72,7 +76,7 @@ impl<'a> StreamState<'a> {
 
     fn emit_close(&self) {
         self.sender
-            .send(Ok(Value {
+            .send(Ok(PathValue {
                 path: self.path.clone(),
                 value: None,
             }))
@@ -164,10 +168,14 @@ impl<'de, 'a> serde::de::Visitor<'de> for &mut StreamState<'a> {
             self.path.push(Index::Array(i));
         }
         self.path.pop();
-        i -= 1;
-        self.path.push(Index::Array(i));
-        self.emit_close();
-        self.path.pop();
+        if i == 0 {
+            self.emit_value(PrimitiveValue::EmptyArray);
+        } else {
+            i -= 1;
+            self.path.push(Index::Array(i));
+            self.emit_close();
+            self.path.pop();
+        }
         Ok(())
     }
 
@@ -209,14 +217,21 @@ impl<'de, 'a> serde::de::Visitor<'de> for &mut StreamState<'a> {
             }
         }
 
+        let mut empty = true;
         self.path.push(Index::Map("".into()));
         while let Some(key) = map.next_key_seed(Str)? {
+            empty = false;
             self.path.pop();
             self.path.push(Index::Map(key));
             map.next_value_seed(&mut *self)?;
         }
-        self.emit_close();
-        self.path.pop();
+        if empty {
+            self.path.pop();
+            self.emit_value(PrimitiveValue::EmptyObject);
+        } else {
+            self.emit_close();
+            self.path.pop();
+        }
         Ok(())
     }
 }
@@ -296,11 +311,11 @@ impl FromReader for Json {
     }
 }
 
-fn main_generic<T: FromReader>() -> impl Iterator<Item = Result<Value>> {
+fn main_generic<T: FromReader>() -> impl Iterator<Item = Result<PathValue>> {
     let (sender, receiver) = sync_channel(1);
     std::thread::spawn(|| {
         thread_local! {
-            static SENDER: RefCell<Option<SyncSender<Result<Value>>>> = RefCell::new(None);
+            static SENDER: RefCell<Option<SyncSender<Result<PathValue>>>> = RefCell::new(None);
         }
         SENDER.with(|snd| snd.borrow_mut().replace(sender));
         struct Stream;
